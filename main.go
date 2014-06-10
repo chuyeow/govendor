@@ -8,7 +8,9 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"strings"
 )
 
 type dependency struct {
@@ -19,34 +21,58 @@ type dependency struct {
 }
 
 func (d *dependency) install(srcPath string) error {
-	log.Printf("Installing %v\n", d.Repo)
+	log.Printf("Installing %v", d.Repo)
 	if err := os.Chdir(srcPath); err != nil {
 		return fmt.Errorf("Failed to navigate to srcPath")
-	}
-	if err := os.RemoveAll(d.Path); err != nil {
-		return fmt.Errorf("Failed to remove %s", d.Path)
 	}
 	if err := os.MkdirAll(d.Path, 0755); err != nil {
 		return fmt.Errorf("Failed to mkdir %s", d.Path)
 	}
 	switch d.Vcs {
 	case "git":
-		if err := exec.Command("git", "clone", "--quiet", "--no-checkout",
-			d.Repo, d.Path).Run(); err != nil {
-			return fmt.Errorf("Failed to clone git %s: %v", d.Path, err)
+		gitDir := path.Join(srcPath, d.Path, ".git")
+		_, err := os.Stat(gitDir)
+		if os.IsNotExist(err) {
+			d.bootstrap(srcPath)
 		}
+
 		if err := os.Chdir(d.Path); err != nil {
 			return fmt.Errorf("Failed to change to %s", d.Path)
 		}
+		out, err := exec.Command("git", "rev-parse", "HEAD").CombinedOutput()
+		if err != nil {
+			d.bootstrap(srcPath)
+		}
+		if strings.TrimSpace(string(out)) == d.Rev {
+			log.Printf("%s already installed", d.Repo)
+			return nil
+		}
+
 		if err := exec.Command("git", "reset", "--quiet", "--hard",
 			d.Rev).Run(); err != nil {
-			return fmt.Errorf("Failed to change to git rev %s: %v", d.Rev, err)
+			if err := exec.Command("git", "fetch").Run(); err != nil {
+				return fmt.Errorf("Failed to fetch latest revisions", err)
+			}
+			if err := exec.Command("git", "reset", "--quiet", "--hard",
+				d.Rev).Run(); err != nil {
+				return fmt.Errorf("Failed to change to git rev %s: %v", d.Rev, err)
+			}
 		}
+
 	case "hg":
 		if err := exec.Command("hg", "clone", "--quiet", "--updaterev", d.Rev,
 			d.Repo, d.Path).Run(); err != nil {
 			return fmt.Errorf("Failed to clone hg %s: %v", d.Path, err)
 		}
+	}
+	return nil
+}
+
+func (d *dependency) bootstrap(srcPath string) error {
+	log.Printf("bootstrapping %v", srcPath)
+	path := path.Join(srcPath, d.Path)
+	if err := exec.Command("git", "clone", "--quiet", d.Repo, path).Run(); err != nil {
+		return fmt.Errorf("Failed to clone git %s: %v", d.Path, err)
 	}
 	return nil
 }
@@ -62,7 +88,7 @@ func main() {
 	// read dependency file
 	deps, err := readDependencies(depPath)
 	if err != nil {
-		log.Fatalf("Invalid dependency file %s: %v\n", depPath, err)
+		log.Fatalf("Invalid dependency file %s: %v", depPath, err)
 	}
 
 	// write .env file
@@ -71,13 +97,13 @@ func main() {
 	// create _vendor directory in current dir
 	srcPath, err := createVendor()
 	if err != nil {
-		log.Fatalf("Failed to create _vendor directory: %v\n", err)
+		log.Fatalf("Failed to create _vendor directory: %v", err)
 	}
 
 	// start installing dependencies
 	for _, dep := range deps {
 		if err := dep.install(srcPath); err != nil {
-			log.Fatal("Failed to install %v: %v", dep.Repo, err)
+			log.Fatalf("Failed to install %v: %v", dep.Repo, err)
 		}
 	}
 	fmt.Println("Dependencies written into _vendor/src")
